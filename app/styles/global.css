@@ -4,3 +4,16 @@
 
 /* Remove the :root and other custom CSS for now */
 
+/* Add these styles */
+.visx-grid line {
+  stroke: #f2f2f2 !important;
+}
+
+.visx-grid-rows line {
+  stroke: #f2f2f2 !important;
+}
+
+.visx-grid-columns line {
+  stroke: #f2f2f2 !important;
+}
+

@@ -10,7 +10,6 @@ import { ScaleTime } from 'd3-scale';
 import { ScaleLinear } from 'd3-scale';
 import { Brush } from '@visx/brush';
 import { PatternLines } from '@visx/pattern';
-import BaseBrush from '@visx/brush/lib/BaseBrush';
 
 // Move color constants outside component
 const COLORS = {
@@ -19,7 +18,12 @@ const COLORS = {
   SELECTED_OPACITY: 1,
   UNSELECTED_OPACITY: 0.6,
   SELECTION_BOX_FILL: 'rgba(255, 39, 0, 0.1)',
-  SELECTION_BOX_STROKE: '#ff2700'
+  SELECTION_BOX_STROKE: '#ff2700',
+  HANDLE_FILL: '#ffffff',
+  HANDLE_STROKE: '#8884d8',
+  BRUSH_BG: '#fafafa',
+  BRUSH_SELECTED_BG: 'rgba(255, 255, 255, 0.5)',  // Changed from '#ffffff' to semi-transparent
+  BRUSH_BORDER: '#e9e9e9',
 };
 
 // Add this helper function near the top of the file
@@ -42,19 +46,73 @@ function getOptimalTickCount(startDate: Date, endDate: Date): number {
     return Math.ceil(diffDays / 7);
   }
   
-  // For ranges less than a year, show monthly ticks
+  // For ranges less than a year, show monthly ticks (reduced from 180 to 30)
   if (diffDays <= 365) {
     return Math.ceil(diffDays / 30);
   }
   
-  // For ranges less than 4 years, show quarterly ticks
+  // For ranges less than 4 years, show quarterly ticks (4 ticks per year)
   if (diffDays <= 365 * 4) {
-    return Math.ceil(diffDays / 90);
+    return Math.ceil(diffDays / (365 / 4));
   }
   
-  // For ranges more than 4 years, show annual ticks
-  return Math.ceil(diffDays / 365);
+  // For ranges more than 4 years, show fewer ticks (about 1 tick per year)
+  return Math.min(12, Math.ceil(diffDays / 365));
 }
+
+// Add this helper function to create the sparkline path
+function createSparklinePath(
+  data: DataPoint[],
+  width: number,
+  height: number,
+  margin: { left: number; right: number; top: number; bottom: number }
+): string {
+  if (!data.length) return '';
+
+  const xScale = scaleTime({
+    range: [margin.left, width - margin.right],
+    domain: [
+      Math.min(...data.map(d => d.timestamp.getTime())),
+      Math.max(...data.map(d => d.timestamp.getTime()))
+    ]
+  });
+
+  const yScale = scaleLinear({
+    range: [height - margin.top, margin.top],
+    domain: [
+      Math.min(...data.map(d => d.value)),
+      Math.max(...data.map(d => d.value))
+    ],
+    nice: true
+  });
+
+  // Use full height for baseline
+  const baselineY = height;
+  
+  return data
+    .reduce((path, point, i) => {
+      const x = xScale(point.timestamp);
+      const y = yScale(point.value);
+      if (isNaN(x) || isNaN(y)) return path;
+      
+      if (i === 0) {
+        // Move to first point
+        return `M ${x},${baselineY} L ${x},${y}`;
+      }
+      // Line to next point
+      return path + ` L ${x},${y}`;
+    }, '')
+    // Close the path back to baseline
+    + ` L ${xScale(data[data.length - 1].timestamp)},${baselineY} Z`;
+}
+
+// Add this constant near the top of the file with other constants
+const BRUSH_EXTENT = {
+  x0: 0,
+  x1: 1,
+  y0: 0,
+  y1: 1
+};
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -78,7 +136,7 @@ export default function Visualization() {
   }>({ start: null, current: null });
   const chartRef = useRef<SVGSVGElement>(null);
   const [timeRange, setTimeRange] = useState<[Date, Date] | null>(null);
-  const brushRef = useRef<BaseBrush | null>(null);
+  const brushRef = useRef<Brush | null>(null);
 
   // Update the data conversion in useMemo
   const data = useMemo(() => {
@@ -167,8 +225,22 @@ export default function Visualization() {
     setSelectionBox({ start: null, current: null });
   };
 
+  // Update the onBrushChange function to constrain the domain
   const onBrushChange = (domain: [Date, Date] | null) => {
-    setTimeRange(domain);
+    if (!domain || !data.length) return;
+    
+    const [minDataTime, maxDataTime] = [
+      Math.min(...data.map(d => d.timestamp.getTime())),
+      Math.max(...data.map(d => d.timestamp.getTime()))
+    ];
+    
+    // Constrain the domain to the data bounds
+    const constrainedDomain: [Date, Date] = [
+      new Date(Math.max(domain[0].getTime(), minDataTime)),
+      new Date(Math.min(domain[1].getTime(), maxDataTime))
+    ];
+    
+    setTimeRange(constrainedDomain);
   };
 
   const filteredData = useMemo(() => {
@@ -192,9 +264,32 @@ export default function Visualization() {
   }
 
   return (
-    <div className="p-6 h-full">
-      <h2 className="text-2xl font-bold mb-4">{dataset?.name}</h2>
-      <div className="bg-white w-full h-[600px]">
+    <div className="p-6 flex flex-col h-full">
+      {/* Header section with title, stats and controls */}
+      <div className="flex items-center justify-between mb-4 flex-shrink-0">
+        <div className="flex items-baseline gap-4">
+          <h2 className="text-2xl font-bold">{dataset?.name}</h2>
+          <span className="text-sm text-gray-600">
+            {selectedPoints.size > 0 
+              ? `${selectedPoints.size} points selected` 
+              : 'No points selected'}
+          </span>
+        </div>
+        <button
+          onClick={() => setSelectedPoints(new Set())}
+          className={`px-3 py-1 text-sm rounded transition-colors
+            ${selectedPoints.size === 0 
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
+              : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+            }`}
+          disabled={selectedPoints.size === 0}
+        >
+          Clear Selection
+        </button>
+      </div>
+
+      {/* Visualization area */}
+      <div className="bg-white flex-grow min-h-0">
         <ParentSize>
           {({ width, height }) => {
             if (width === 0 || height === 0) return null;
@@ -264,19 +359,23 @@ export default function Visualization() {
                       nice: true
                     }}
                   >
-                    {/* <Grid
+                    <Grid
                       numTicks={numTicks}
-                      strokeWidth={1}
-                      stroke={'grey'}
-                    /> */}
+                      strokeDasharray="4,4"
+                      lineStyle={{ stroke: '#f2f2f2', strokeWidth: 1 }}
+                      rows={true}
+                      columns={true}
+                    />
                     <AnimatedAxis 
                       orientation="bottom"
                       label="Time"
+                      stroke="#f2f2f2"
                       numTicks={numTicks}
                     />
                     <AnimatedAxis 
                       orientation="left"
                       label="Value"
+                      stroke="#f2f2f2"
                       numTicks={8}
                     />
                     <AnimatedLineSeries
@@ -295,29 +394,66 @@ export default function Visualization() {
                 </div>
 
                 {/* Brush component */}
-                <div style={{ height: brushHeight, marginTop: '20px' }}>
-                  <svg width={width} height={brushHeight}>
-                    <PatternLines
-                      id="brush-pattern"
-                      height={8}
-                      width={8}
-                      stroke={COLORS.UNSELECTED}
-                      strokeWidth={1}
-                      orientation={['diagonal']}
+                <div style={{ 
+                  height: brushHeight, 
+                  marginTop: '20px',
+                  width: width - margin.left - margin.right,
+                  marginLeft: margin.left
+                }}>
+                  <svg width={width - margin.left - margin.right} height={brushHeight}>
+                    {/* Define gradient for the area chart */}
+                    <defs>
+                      <linearGradient id="sparklineGradient" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0%" stopColor={COLORS.UNSELECTED} stopOpacity={0.4} />
+                        <stop offset="100%" stopColor={COLORS.UNSELECTED} stopOpacity={0.1} />
+                      </linearGradient>
+                      {/* Pattern for the brush selection */}
+                      <pattern
+                        id="diagonalLines"
+                        patternUnits="userSpaceOnUse"
+                        width="4"
+                        height="4"
+                        patternTransform="rotate(45)"
+                      >
+                        <line
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="4"
+                          stroke={COLORS.UNSELECTED}
+                          strokeWidth="1.5"  // Increased from 1
+                          opacity="0.5"      // Increased from 0.3
+                        />
+                      </pattern>
+                    </defs>
+
+                    {/* Background rectangle */}
+                    <rect
+                      x={0}
+                      y={0}
+                      width={width - margin.left - margin.right}
+                      height={brushHeight}
+                      fill={COLORS.BRUSH_BG}
                     />
-                    {/* Add the background line series first */}
-                    <AnimatedLineSeries
-                      dataKey="brush-line"
-                      data={data}
-                      xAccessor={d => d.timestamp}
-                      yAccessor={d => d.value}
-                      stroke={COLORS.UNSELECTED}
-                      strokeWidth={1}
-                    />
-                    {/* Then add the brush without children */}
+
+                    {/* Mini visualization of the data */}
+                    <g>
+                      <path
+                        d={createSparklinePath(data, width - margin.left - margin.right, brushHeight, {
+                          left: 0,
+                          right: 0,
+                          top: 5,
+                          bottom: 0
+                        })}
+                        fill="url(#sparklineGradient)"
+                        strokeWidth={0}
+                        opacity={0.8}
+                      />
+                    </g>
+
                     <Brush
                       xScale={scaleTime({
-                        range: [margin.left, width - margin.right],
+                        range: [0, width - margin.left - margin.right],
                         domain: [
                           Math.min(...data.map(d => d.timestamp.getTime())),
                           Math.max(...data.map(d => d.timestamp.getTime()))
@@ -327,16 +463,17 @@ export default function Visualization() {
                         range: [brushHeight, 0],
                         domain: [0, Math.max(...data.map(d => d.value))]
                       })}
-                      width={width}
+                      width={width - margin.left - margin.right}
                       height={brushHeight}
-                      margin={margin}
+                      margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
                       handleSize={8}
                       resizeTriggerAreas={['left', 'right']}
                       brushDirection="horizontal"
                       initialBrushPosition={{
-                        start: { x: margin.left },
-                        end: { x: width - margin.right }
+                        start: { x: 0 },
+                        end: { x: width - margin.left - margin.right }
                       }}
+                      ref={brushRef}  // Use ref instead of innerRef
                       onChange={domain => {
                         if (!domain) return;
                         const { x0, x1 } = domain;
@@ -346,8 +483,50 @@ export default function Visualization() {
                         setTimeRange(null);
                       }}
                       selectedBoxStyle={{
-                        fill: 'url(#brush-pattern)',
-                        stroke: COLORS.UNSELECTED
+                        fill: 'url(#diagonalLines)',
+                        stroke: COLORS.BRUSH_BORDER,
+                        rx: 8
+                      }}
+                      renderBrushHandle={({ x, height, isBrushActive }) => {
+                        const handleWidth = 6;
+                        const dotSize = 2;
+                        const dotSpacing = 3;
+                        const numDots = 4;
+                        const totalDotsHeight = (numDots - 1) * dotSpacing; // Height from first dot center to last dot center
+                        const handleHeight = totalDotsHeight + 8; // 4px padding top and bottom
+                        const handleY = (height - handleHeight) / 2; // Center the handle vertically
+                        const handleX = x + 4; // Move handle 4px to the right
+                        
+                        // Calculate the starting Y position for perfect vertical centering
+                        const firstDotY = handleY + handleHeight/2 - totalDotsHeight/2;
+                        
+                        return (
+                          <g>
+                            {/* Handle bar */}
+                            <rect
+                              x={handleX - handleWidth / 2}
+                              y={handleY}
+                              width={handleWidth}
+                              height={handleHeight}
+                              fill={COLORS.HANDLE_FILL}
+                              stroke={COLORS.HANDLE_STROKE}
+                              strokeWidth={1}
+                              rx={2}
+                              style={{ cursor: 'ew-resize' }}
+                            />
+                            {/* Handle dots */}
+                            {Array.from({ length: numDots }).map((_, i) => (
+                              <circle
+                                key={i}
+                                cx={handleX}
+                                cy={firstDotY + (i * dotSpacing)}
+                                r={dotSize / 2}
+                                fill={COLORS.HANDLE_STROKE}
+                                style={{ cursor: 'ew-resize' }}
+                              />
+                            ))}
+                          </g>
+                        );
                       }}
                     />
                   </svg>
@@ -356,16 +535,6 @@ export default function Visualization() {
             );
           }}
         </ParentSize>
-      </div>
-      <div className="mt-4 text-sm text-gray-600">
-        <p>Selected points: {selectedPoints.size}</p>
-        <button
-          onClick={() => setSelectedPoints(new Set())}
-          className="mt-2 px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded"
-          disabled={selectedPoints.size === 0}
-        >
-          Clear Selection
-        </button>
       </div>
     </div>
   );
