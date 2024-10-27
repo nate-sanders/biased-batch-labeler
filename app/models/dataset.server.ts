@@ -4,9 +4,10 @@ export type Dataset = {
   id: string;
   name: string;
   projectId: string;
-  filePath: string;  // Add this field
+  filePath: string;
   createdAt: string;
   updatedAt: string;
+  dataPoints?: DataPoint[];
 };
 
 export interface DataPoint {
@@ -15,17 +16,36 @@ export interface DataPoint {
 }
 
 export async function getDatasetById(id: string): Promise<Dataset | null> {
-  const { data, error } = await supabase
-    .from('datasets')
-    .select(`
-      *,
-      data_points (*)
-    `)
-    .eq('id', id)
-    .single();
+  try {
+    // First get the dataset
+    const { data: dataset, error: datasetError } = await supabase
+      .from('datasets')
+      .select('*')
+      .eq('id', id)
+      .single();
 
-  if (error) return null;
-  return transformDataset(data);
+    if (datasetError) throw datasetError;
+    if (!dataset) return null;
+
+    // Then get the data points
+    const { data: dataPoints, error: pointsError } = await supabase
+      .from('data_points')
+      .select('*')
+      .eq('dataset_id', id)
+      .order('timestamp', { ascending: true });
+
+    if (pointsError) throw pointsError;
+
+    // Transform and combine the data
+    const transformedDataset = transformDataset(dataset);
+    transformedDataset.dataPoints = dataPoints ? dataPoints.map(transformDataPoint) : [];
+    
+    console.log('Dataset from DB:', transformedDataset); // Add debugging
+    return transformedDataset;
+  } catch (error) {
+    console.error('Error fetching dataset:', error);
+    throw error;
+  }
 }
 
 export async function getDatasetsByProject(projectId: string): Promise<Dataset[]> {
