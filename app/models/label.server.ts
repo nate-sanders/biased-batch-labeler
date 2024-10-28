@@ -20,13 +20,21 @@ export async function getLabelsByProject(projectId: string): Promise<Label[]> {
   return data ? data.map(transformLabel) : [];
 }
 
-export async function createLabel({ name, projectId }: { name: string; projectId: string }) {
+export async function createLabel({ 
+  name, 
+  projectId, 
+  color = '#000000' // Add default black color
+}: { 
+  name: string; 
+  projectId: string;
+  color?: string;
+}) {
   const { data, error } = await supabase
     .from('labels')
     .insert([
       {
         name,
-        color: '#000000', // Default color
+        color,
         project_id: projectId,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -68,6 +76,16 @@ export async function deleteLabel(id: string): Promise<void> {
     .eq('id', id);
 
   if (error) throw error;
+}
+
+export async function getLabels(): Promise<Label[]> {
+  const { data, error } = await supabase
+    .from('labels')
+    .select('*')
+    .order('name', { ascending: true });
+
+  if (error) throw error;
+  return data ? data.map(transformLabel) : [];
 }
 
 function transformLabel(data: any): Label {

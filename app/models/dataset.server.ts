@@ -15,37 +15,26 @@ export interface DataPoint {
   value: number;
 }
 
+export type DatasetStatus = 'ready' | 'in-progress' | 'complete';
+
 export async function getDatasetById(id: string): Promise<Dataset | null> {
-  try {
-    // First get the dataset
-    const { data: dataset, error: datasetError } = await supabase
-      .from('datasets')
-      .select('*')
-      .eq('id', id)
-      .single();
+  const { data, error } = await supabase
+    .from('datasets')
+    .select(`
+      *,
+      dataPoints:data_points(*)
+    `)
+    .eq('id', id)
+    .single();
 
-    if (datasetError) throw datasetError;
-    if (!dataset) return null;
+  if (error) throw error;
+  if (!data) return null;
 
-    // Then get the data points
-    const { data: dataPoints, error: pointsError } = await supabase
-      .from('data_points')
-      .select('*')
-      .eq('dataset_id', id)
-      .order('timestamp', { ascending: true });
-
-    if (pointsError) throw pointsError;
-
-    // Transform and combine the data
-    const transformedDataset = transformDataset(dataset);
-    transformedDataset.dataPoints = dataPoints ? dataPoints.map(transformDataPoint) : [];
-    
-    console.log('Dataset from DB:', transformedDataset); // Add debugging
-    return transformedDataset;
-  } catch (error) {
-    console.error('Error fetching dataset:', error);
-    throw error;
-  }
+  return {
+    ...data,
+    status: data.status as DatasetStatus || 'ready', // Add default status
+    dataPoints: data.dataPoints || []
+  };
 }
 
 export async function getDatasetsByProject(projectId: string): Promise<Dataset[]> {
@@ -210,4 +199,16 @@ export async function getDatasetFileUrl(filePath: string): Promise<string> {
     .getPublicUrl(filePath);
   
   return data.publicUrl;
+}
+
+export async function updateDatasetStatus(datasetId: string, status: DatasetStatus) {
+  const { error } = await supabase
+    .from('datasets')
+    .update({ status })
+    .eq('id', datasetId);
+
+  if (error) {
+    console.error('Error updating dataset status:', error);
+    throw new Error('Failed to update dataset status');
+  }
 }

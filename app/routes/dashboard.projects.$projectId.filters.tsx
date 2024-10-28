@@ -1,10 +1,10 @@
 import { type ReactNode } from "react";
 
-export default function Filters(): ReactNode {
+export default function FiltersPanel(): ReactNode {
   return (
-    <div>
+    <div className="p-4">
       <h2 className="text-2xl font-bold mb-4">Filters</h2>
-      {/* Filters content here */}
+      {/* Add your filter controls here */}
     </div>
   );
 }

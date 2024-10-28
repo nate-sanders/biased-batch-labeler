@@ -17,6 +17,7 @@ import { ContextMenu } from "~/components/ContextMenu";
 import { FileUploadButton } from "~/components/FileUploadButton";
 import { DatasetMappingModal } from "~/components/DatasetMappingModal";
 import { Form } from "@remix-run/react";
+import CreateLabelModal from '~/components/CreateLabelModal';
 
 // Add this type definition
 type FetcherData = {
@@ -110,6 +111,7 @@ export default function DashboardLayout() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [deletedIds, setDeletedIds] = useState<string[]>([]);
   const initializedRef = useRef(false);
+  const [isCreateLabelModalOpen, setIsCreateLabelModalOpen] = useState(false);
 
   // Add selectedProject definition
   const selectedProject = params.projectId 
@@ -213,17 +215,23 @@ export default function DashboardLayout() {
   };
 
   const handleNewLabel = () => {
-    const name = prompt("Enter label name:");
-    if (name && selectedProject?.id) {
-      const formData = new FormData();
-      formData.append("intent", "createLabel");
-      formData.append("name", name);
-      
-      fetcher.submit(formData, {
-        method: "post",
-        action: `/dashboard/projects/${selectedProject.id}/labels`
-      });
-    }
+    setIsCreateLabelModalOpen(true);
+  };
+
+  const handleCreateLabel = async (name: string, color: string) => {
+    if (!selectedProject?.id) return;
+    
+    const formData = new FormData();
+    formData.append("intent", "createLabel");
+    formData.append("name", name);
+    formData.append("color", color);
+    
+    fetcher.submit(formData, {
+      method: "post",
+      action: `/dashboard/projects/${selectedProject.id}/labels`
+    });
+    
+    setIsCreateLabelModalOpen(false);
   };
 
   const handleNewDataset = () => {
@@ -517,9 +525,13 @@ export default function DashboardLayout() {
                           <div
                             key={label.id}
                             onContextMenu={(e) => handleContextMenu(e, 'label', label.id)}
-                            className="block text-xs w-full text-left px-2 py-2 rounded hover:bg-gray-100"
+                            className="flex items-center gap-2 px-2 py-2 rounded hover:bg-gray-100"
                           >
-                            {label.name}
+                            <div 
+                              className="w-2 h-2 rounded-full" 
+                              style={{ backgroundColor: label.color || '#000000' }}
+                            />
+                            <span className="text-xs">{label.name}</span>
                           </div>
                         ))}
                       </div>
@@ -623,6 +635,11 @@ export default function DashboardLayout() {
         onClose={() => setIsMappingModalOpen(false)}
         headers={csvHeaders}
         onSave={handleSaveMapping}
+      />
+      <CreateLabelModal
+        open={isCreateLabelModalOpen}
+        onOpenChange={setIsCreateLabelModalOpen}
+        onSubmit={handleCreateLabel}
       />
     </div>
   );
