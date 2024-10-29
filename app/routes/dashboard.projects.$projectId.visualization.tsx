@@ -1,6 +1,6 @@
 import { json, type LoaderFunctionArgs, type ActionFunctionArgs } from "@remix-run/node";
 import { useLoaderData, useSearchParams, useSubmit } from "@remix-run/react";
-import { getDatasetById, updateDatasetStatus, type DatasetStatus } from "~/models/dataset.server";
+import { getDatasetById, updateDatasetStatus, type DatasetStatus, getLabeledDataPoints, saveLabeledDataPoints, removeLabeledDataPoints, type LabeledDataPoint } from "~/models/dataset.server";
 import { XYChart, AnimatedLineSeries, AnimatedAxis, Grid, Tooltip, DataContext } from '@visx/xychart';
 import { scaleLinear, scaleTime } from '@visx/scale';
 import { ParentSize } from '@visx/responsive';
@@ -21,8 +21,12 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 const COLORS = {
   SELECTED: '#ff2700',
   UNSELECTED: '#8884d8',
+  LABELED: '#4CAF50',
+  LABELED_RING: '#45a049',
+  LABELED_STROKE: '#2E7D32',
   SELECTED_OPACITY: 1,
   UNSELECTED_OPACITY: 0.6,
+  LABELED_OPACITY: 0.9,
   SELECTION_BOX_FILL: 'rgba(255, 39, 0, 0.1)',
   SELECTION_BOX_STROKE: '#ff2700',
   HANDLE_FILL: '#ffffff',
@@ -124,51 +128,60 @@ const BRUSH_EXTENT = {
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const datasetId = url.searchParams.get('datasetId');
-  console.log('Loading dataset:', datasetId);
 
   if (!datasetId) {
-    return json({ dataset: null, dataPoints: [], labels: [] });
+    return json({ dataset: null, dataPoints: [], labels: [], labeledPoints: [] });
   }
 
-  // Fetch both dataset and labels in parallel
-  const [dataset, labels] = await Promise.all([
+  // Fetch dataset, labels, and labeled points in parallel
+  const [dataset, labels, labeledPoints] = await Promise.all([
     getDatasetById(datasetId),
-    getLabels()
+    getLabels(),
+    getLabeledDataPoints(datasetId)
   ]);
   
-  // Add error handling and data validation
+  console.log('Loaded dataset:', dataset);
+  console.log('Loaded labeled points:', labeledPoints);
+  console.log('Number of labeled points:', labeledPoints.length);
+
   if (!dataset) {
     throw new Error(`Dataset with id ${datasetId} not found`);
   }
 
-  // Ensure dataPoints exists and is properly formatted
-  const dataPoints = dataset.dataPoints?.map(point => ({
-    timestamp: new Date(point.timestamp).toISOString(),
-    value: Number(point.value),
-  })) || [];
-
-  return json({ dataset, dataPoints, labels });
+  return json({ dataset, dataPoints: dataset.dataPoints, labels, labeledPoints });
 }
 
-// Add action function to handle status updates
+// Update the action function with better logging
 export async function action({ request, params }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
   const datasetId = formData.get("datasetId");
 
-  if (intent === "updateStatus" && typeof datasetId === "string") {
-    const status = formData.get("status");
-    
-    if (typeof status !== "string" || !['ready', 'in-progress', 'complete'].includes(status)) {
-      return json({ error: "Invalid status" }, { status: 400 });
-    }
+  console.log('Action called with intent:', intent);
+  console.log('Dataset ID:', datasetId);
 
+  if (intent === "saveLabels" && typeof datasetId === "string") {
+    const selectedPoints = JSON.parse(formData.get("selectedPoints") as string);
+    const selectedLabels = JSON.parse(formData.get("selectedLabels") as string);
+    
+    console.log('Saving labels:', { selectedPoints, selectedLabels });
+    
     try {
-      await updateDatasetStatus(datasetId, status as DatasetStatus);
+      const labeledPoints: LabeledDataPoint[] = selectedPoints.flatMap((timestamp: string) =>
+        selectedLabels.map((labelId: string) => ({
+          datasetId,
+          timestamp,
+          labelId
+        }))
+      );
+
+      console.log('Labeled points to save:', labeledPoints);
+
+      await saveLabeledDataPoints(labeledPoints);
       return json({ success: true });
     } catch (error) {
       console.error('Error in action:', error);
-      return json({ error: "Failed to update status" }, { status: 500 });
+      return json({ error: "Failed to save labels", details: error }, { status: 500 });
     }
   }
 
@@ -177,7 +190,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
 // Update the main component to handle dataset changes
 export default function Visualization() {
-  const { dataset, dataPoints, labels } = useLoaderData<typeof loader>();
+  const { dataset, dataPoints, labels, labeledPoints } = useLoaderData<typeof loader>();
   const [searchParams] = useSearchParams();
   const datasetId = searchParams.get('datasetId');
   const [selectedPoints, setSelectedPoints] = useState<Set<string>>(new Set());
@@ -193,6 +206,39 @@ export default function Visualization() {
   const [popoverPosition, setPopoverPosition] = useState<{ x: number; y: number } | null>(null);
   const [datasetStatus, setDatasetStatus] = useState<DatasetStatus>(dataset?.status || 'ready');
   const submit = useSubmit();
+
+  // Add state for labeled points
+  const [labeledPointsMap, setLabeledPointsMap] = useState<Map<string, Set<string>>>(new Map());
+
+  // Initialize labeled points from the database
+  useEffect(() => {
+    if (!labeledPoints) {
+      console.log('No labeled points provided');
+      return;
+    }
+    
+    console.log('Setting up labeledPointsMap with points:', labeledPoints);
+    const newMap = new Map<string, Set<string>>();
+    
+    labeledPoints.forEach(point => {
+      if (!point) {
+        console.log('Skipping null point');
+        return;
+      }
+      
+      // Store timestamp without milliseconds and Z
+      const timestamp = point.timestamp;
+      console.log('Processing point timestamp:', timestamp);
+      
+      const existing = newMap.get(timestamp) || new Set();
+      existing.add(point.labelId);
+      newMap.set(timestamp, existing);
+    });
+    
+    console.log('Final labeledPointsMap:', newMap);
+    console.log('Map entries:', Array.from(newMap.entries()));
+    setLabeledPointsMap(newMap);
+  }, [labeledPoints]);
 
   // Reset state when dataset changes
   useEffect(() => {
@@ -274,7 +320,6 @@ export default function Visualization() {
 
     const rect = chartRef.current.getBoundingClientRect();
     const margin = { top: 20, right: 16, bottom: 40, left: 48 };
-    const chartWidth = rect.width - margin.left - margin.right;
 
     // Create scales that match the XYChart's scales
     const xScale = scaleTime({
@@ -292,17 +337,23 @@ export default function Visualization() {
     const minTime = xScale.invert(minX);
     const maxTime = xScale.invert(maxX);
 
+    console.log('Selection range:', { minTime, maxTime });
+
     // Store timestamps within the selected range
     const newSelectedPoints = new Set<string>();
     filteredData.forEach((point) => {
       const timestamp = point.timestamp.getTime();
       if (timestamp >= minTime.getTime() && timestamp <= maxTime.getTime()) {
-        newSelectedPoints.add(point.timestamp.toISOString());
+        const formattedTimestamp = point.timestamp.toISOString().replace('.000Z', '');
+        newSelectedPoints.add(formattedTimestamp);
+        console.log('Adding point to selection:', formattedTimestamp);
       }
     });
 
+    console.log('Selected points:', newSelectedPoints);
+
     if (newSelectedPoints.size > 0) {
-      // Set popover position to the current mouse position
+      setSelectedPoints(newSelectedPoints);
       setPopoverPosition({
         x: selectionBox.current.x,
         y: selectionBox.current.y
@@ -311,7 +362,6 @@ export default function Visualization() {
       setPopoverPosition(null);
     }
     
-    setSelectedPoints(newSelectedPoints);
     setIsDragging(false);
     setSelectionBox({ start: null, current: null });
   };
@@ -357,11 +407,38 @@ export default function Visualization() {
     });
   };
 
-  // Add handler for applying labels
-  const handleApplyLabels = () => {
-    // TODO: Add API call to save labels for selected points
-    console.log('Applying labels:', Array.from(selectedLabels));
-    console.log('To points:', Array.from(selectedPoints));
+  // Update the handleApplyLabels function with better error handling and logging
+  const handleApplyLabels = async () => {
+    if (!dataset?.id) return;
+
+    console.log('Selected Points:', Array.from(selectedPoints));
+    console.log('Selected Labels:', Array.from(selectedLabels));
+
+    // Update local state immediately
+    const newLabeledPointsMap = new Map(labeledPointsMap);
+    Array.from(selectedPoints).forEach(timestamp => {
+      const existingLabels = newLabeledPointsMap.get(timestamp) || new Set();
+      Array.from(selectedLabels).forEach(labelId => {
+        existingLabels.add(labelId);
+      });
+      newLabeledPointsMap.set(timestamp, existingLabels);
+    });
+    setLabeledPointsMap(newLabeledPointsMap);
+
+    try {
+      // Submit to server
+      const formData = new FormData();
+      formData.append("intent", "saveLabels");
+      formData.append("datasetId", dataset.id);
+      formData.append("selectedPoints", JSON.stringify(Array.from(selectedPoints)));
+      formData.append("selectedLabels", JSON.stringify(Array.from(selectedLabels)));
+      
+      const result = await submit(formData, { method: "post" });
+      console.log('Submit result:', result);
+    } catch (error) {
+      console.error('Error saving labels:', error);
+    }
+
     setPopoverPosition(null);
     setSelectedLabels(new Set());
   };
@@ -574,7 +651,8 @@ export default function Visualization() {
                     />
                     <DataPoints 
                       data={filteredData} 
-                      selectedPoints={selectedPoints} 
+                      selectedPoints={selectedPoints}
+                      labeledPointsMap={labeledPointsMap}
                     />
                   </XYChart>
                 </div>
@@ -840,15 +918,18 @@ interface DataPoint {
 interface DataPointsProps {
   data: DataPoint[];
   selectedPoints: Set<string>;
+  labeledPointsMap: Map<string, Set<string>>;
 }
 
-function DataPoints({ data, selectedPoints }: DataPointsProps) {
+function DataPoints({ data, selectedPoints, labeledPointsMap }: DataPointsProps) {
   const { xScale, yScale } = useContext(DataContext) as {
     xScale: ScaleTime<number, number>;
     yScale: ScaleLinear<number, number>;
   };
   
   if (!xScale || !yScale) return null;
+
+  console.log('DataPoints render - selectedPoints:', selectedPoints);
   
   return (
     <g>
@@ -860,18 +941,96 @@ function DataPoints({ data, selectedPoints }: DataPointsProps) {
           return null;
         }
 
-        const isSelected = selectedPoints.has(point.timestamp.toISOString());
+        const timestamp = point.timestamp.toISOString().replace('.000Z', '');
+        const isSelected = selectedPoints.has(timestamp);
+        const isLabeled = labeledPointsMap.has(timestamp);
+
+        if (isSelected) {
+          console.log('Rendering selected point:', { timestamp, isLabeled });
+        }
 
         return (
-          <circle
-            key={index}
-            cx={x}
-            cy={y}
-            r={isSelected ? 4 : 2}
-            fill={isSelected ? COLORS.SELECTED : COLORS.UNSELECTED}
-            opacity={isSelected ? COLORS.SELECTED_OPACITY : COLORS.UNSELECTED_OPACITY}
-            className="transition-all duration-50"
-          />
+          <g key={index}>
+            {/* Unlabeled points */}
+            {!isLabeled && (
+              <>
+                {/* Selection ring for unlabeled points */}
+                {isSelected && (
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r={5}
+                    fill="none"
+                    stroke={COLORS.SELECTED}
+                    strokeWidth={1.5}
+                    className="transition-all duration-50"
+                  />
+                )}
+                {/* Main unlabeled point */}
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={isSelected ? 4 : 2}
+                  fill={isSelected ? COLORS.SELECTED : COLORS.UNSELECTED}
+                  opacity={isSelected ? COLORS.SELECTED_OPACITY : COLORS.UNSELECTED_OPACITY}
+                  style={{ 
+                    pointerEvents: 'all',
+                    cursor: 'pointer',
+                    transition: 'all 150ms ease'
+                  }}
+                />
+              </>
+            )}
+
+            {/* Labeled points */}
+            {isLabeled && (
+              <>
+                {/* White background */}
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={5}
+                  fill="white"
+                  className="transition-all duration-50"
+                />
+                {/* Green ring for labeled state */}
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={4}
+                  fill="none"
+                  stroke={COLORS.LABELED_STROKE}
+                  strokeWidth={1}
+                  className="transition-all duration-50"
+                />
+                {/* Main labeled point */}
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={3}
+                  fill={isSelected ? COLORS.SELECTED : COLORS.LABELED}
+                  opacity={isSelected ? COLORS.SELECTED_OPACITY : COLORS.LABELED_OPACITY}
+                  style={{ 
+                    pointerEvents: 'all',
+                    cursor: 'pointer',
+                    transition: 'all 150ms ease'
+                  }}
+                />
+                {/* Selection ring for labeled points */}
+                {isSelected && (
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r={4}
+                    fill="none"
+                    stroke={COLORS.SELECTED}
+                    strokeWidth={1.5}
+                    className="transition-all duration-50"
+                  />
+                )}
+              </>
+            )}
+          </g>
         );
       })}
     </g>
@@ -879,7 +1038,7 @@ function DataPoints({ data, selectedPoints }: DataPointsProps) {
 }
 
 // Add this new StatusIcon component within the same file:
-function StatusIcon({ status }: { status: StatusType }) {
+function StatusIcon({ status }: { status: DatasetStatus }) {
   switch (status) {
     case 'ready':
       return (

@@ -7,6 +7,7 @@ export type Dataset = {
   filePath: string;
   createdAt: string;
   updatedAt: string;
+  status: DatasetStatus;
   dataPoints?: DataPoint[];
 };
 
@@ -181,6 +182,7 @@ function transformDataset(data: any): Dataset {
     filePath: data.file_path,
     createdAt: data.created_at,
     updatedAt: data.updated_at,
+    status: data.status || 'ready',
   };
 }
 
@@ -210,5 +212,62 @@ export async function updateDatasetStatus(datasetId: string, status: DatasetStat
   if (error) {
     console.error('Error updating dataset status:', error);
     throw new Error('Failed to update dataset status');
+  }
+}
+
+// Add to existing types
+export interface LabeledDataPoint {
+  datasetId: string;
+  timestamp: string;
+  labelId: string;
+}
+
+// Add these new functions
+export async function getLabeledDataPoints(datasetId: string): Promise<LabeledDataPoint[]> {
+  const { data, error } = await supabase
+    .from('labeled_data_points')
+    .select('*')
+    .eq('dataset_id', datasetId);
+
+  if (error) throw error;
+  return data ? data.map(point => ({
+    datasetId: point.dataset_id,
+    timestamp: point.timestamp,
+    labelId: point.label_id
+  })) : [];
+}
+
+export async function saveLabeledDataPoints(points: LabeledDataPoint[]) {
+  console.log('Attempting to save points:', points);
+
+  const { data, error } = await supabase
+    .from('labeled_data_points')
+    .insert(points.map(point => ({
+      dataset_id: point.datasetId,
+      timestamp: point.timestamp,
+      label_id: point.labelId,
+      created_at: new Date().toISOString()
+    })))
+    .select();
+
+  if (error) {
+    console.error('Database error saving labeled points:', error);
+    throw new Error(`Failed to save labeled points: ${error.message}`);
+  }
+
+  console.log('Successfully saved points:', data);
+  return data;
+}
+
+export async function removeLabeledDataPoints(datasetId: string, timestamps: string[]) {
+  const { error } = await supabase
+    .from('labeled_data_points')
+    .delete()
+    .eq('dataset_id', datasetId)
+    .in('timestamp', timestamps);
+
+  if (error) {
+    console.error('Error removing labeled points:', error);
+    throw new Error('Failed to remove labeled points');
   }
 }
